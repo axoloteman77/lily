@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Lily Bouquet</title>
+<style>
+  :root { --bg:#07060b; --ink:#d9d2e6; --dim:#8d86a0; --line:#2a2536; --accent:#f08fb0; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.4 "Iowan Old Style", Georgia, serif; }
+  body { display:flex; flex-direction:column; height:100dvh; }
+  #stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; padding:8px; }
+  canvas { display:block; max-width:100%; }
+  #ui { display:flex; flex-wrap:wrap; gap:10px 22px; align-items:center; justify-content:center;
+    padding:12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); border-top:1px solid var(--line); }
+  #ui label { display:flex; align-items:center; gap:8px; color:var(--dim); }
+  input[type=range] { width:110px; accent-color:var(--accent); }
+  #tl { width:190px; }
+  button, select { background:#14111c; color:var(--ink); border:1px solid var(--line);
+    border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:hover, select:hover { border-color:var(--accent); }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<div id="ui">
+  <button id="pp" type="button">Pausar</button>
+  <button id="rs" type="button">Reiniciar</button>
+  <label>Tiempo <input id="tl" type="range" min="0" max="14" step="0.01" value="0"></label>
+  <label>Velocidad <input id="sp" type="range" min="0.1" max="3" step="0.1" value="1"></label>
+  <label>Movimiento <input id="am" type="range" min="0" max="2" step="0.05" value="1"></label>
+  <label>Brillo <input id="sh" type="range" min="0" max="1" step="0.05" value="1"></label>
+  <label>Densidad <input id="dn" type="range" min="0.2" max="1" step="0.05" value="1"></label>
+  <label>Modo
+    <select id="md"><option value="ascii">ASCII</option><option value="blocks">Bloques</option><option value="dots">Puntos</option></select>
+  </label>
+</div>
+
+<!-- scene.js lo genera: python lily_bouquet.py -->
+<script src="scene.js"></script>
+<script>
+const S = window.SCENE;
+if (!S) {
+  document.body.innerHTML = '<p style="padding:2em">Falta scene.js. Ejecuta <code>python lily_bouquet.py</code> en esta carpeta y recarga.</p>';
+  throw new Error('scene.js no encontrado');
+}
+const $ = id => document.getElementById(id);
+const cv = $('c'), g = cv.getContext('2d');
+const C = S.cells, N = C.length, FS = S.fstart, F = S.flowers, LV = S.leaves, A = S.aspect, TL = S.timeline;
+const BG = '#07060b', BL = '░▒▓█';
+const ph = Float32Array.from({length: N}, () => Math.random() * 6.283);
+const rk = Float32Array.from({length: N}, () => Math.random());
+const PX = new Float32Array(N), PY = new Float32Array(N), PA = new Float32Array(N), vis = new Uint8Array(N), PC = new Array(N);
+const occ = new Uint8Array(S.cols * S.rows);
+const fg = [], fsb = [], fe = [], fsw = [], fbr = [], fcs = [], fsn = [], lg = [];
+const CR = new Uint8Array(N), CG = new Uint8Array(N), CB = new Uint8Array(N);
+C.forEach((c, i) => { CR[i] = parseInt(c[3].slice(1, 3), 16); CG[i] = parseInt(c[3].slice(3, 5), 16); CB[i] = parseInt(c[3].slice(5, 7), 16); });
+
+let cw, chh, dpr, T = 0, last = performance.now(), paused = false, drag = false;
+let speed = 1, amp = 1, shim = 1, dens = 1, mode = 'ascii';
+const cl = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const ease = x => { x = cl(x); return x * x * (3 - 2 * x); };
+const sway = y => { const hf = 1 - y / S.rows; return amp * 2.2 * Math.pow(hf, 1.6) * Math.sin(T * 0.8 + hf * 2.2); };
+
+$('tl').max = TL.total;
+
+function fit() {
+  dpr = window.devicePixelRatio || 1;
+  const box = $('stage'), W = box.clientWidth - 16, H = box.clientHeight - 16;
+  cw = Math.min(W / S.cols, H / S.rows / 2);   // la celda de texto es ~2 veces más alta que ancha
+  chh = cw * 2;
+  cv.width = Math.round(S.cols * cw * dpr);
+  cv.height = Math.round(S.rows * chh * dpr);
+  cv.style.width = S.cols * cw + 'px';
+  cv.style.height = S.rows * chh + 'px';
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.font = `bold ${chh * 0.92}px "DejaVu Sans Mono", Menlo, Consolas, monospace`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+}
+
+// Estado de cada flor / hoja en el instante T (todo sale de la línea de tiempo de Python)
+function prep() {
+  F.forEach((f, i) => {
+    fg[i] = ease((T - f[3]) / f[4]);                     // crecimiento del tallo
+    fsb[i] = ease((T - f[3] - f[4] + 0.3) / 1.2);        // aparece el brote
+    fe[i] = ease((T - f[5]) / f[6]);                     // apertura 0 = brote, 1 = flor
+    fsw[i] = sway(f[1]);
+    fbr[i] = 1 + 0.025 * amp * Math.sin(T * 1.1 + f[2]) * fe[i];      // respiración
+    const th = 0.035 * amp * Math.sin(T * 0.7 + f[2]) * fe[i];        // giro leve
+    fcs[i] = Math.cos(th); fsn[i] = Math.sin(th);
+  });
+  LV.forEach((l, i) => { lg[i] = ease((T - l[2]) / l[3]); });
+}
+
+function put(i, x, y, a, col, dot) {
+  g.globalAlpha = cl(a);
+  g.fillStyle = col;
+  const px = (x + 0.5) * cw, py = (y + 0.5) * chh;
+  if (mode === 'dots' && dot) {
+    g.beginPath(); g.arc(px, py, cw * (0.25 + 0.5 * C[i][4]), 0, 6.283); g.fill();
+  } else {
+    g.fillText(mode === 'blocks' && dot ? BL[Math.min(3, (C[i][4] * 4) | 0)] : C[i][2], px, py);
+  }
+}
+
+function draw() {
+  g.globalAlpha = 1;
+  g.fillStyle = BG;
+  g.fillRect(0, 0, S.cols * cw, S.rows * chh);
+  prep();
+  occ.fill(0);
+
+  // 1) flores: posición = brote -> flor abierta, y marca las celdas que ocupan
+  for (let i = FS; i < N; i++) {
+    vis[i] = 0;
+    const c = C[i], k = c[5], id = c[6], f = F[id];
+    if (rk[i] > dens) continue;
+    const sb = fsb[id], e = fe[id];
+    if (sb < 0.02) continue;
+    let a;
+    if (k === 4) { if (e < 0.5) continue; a = cl((e - 0.5) / 0.4); }
+    else a = 0.85 + 0.15 * shim * Math.sin(T * 2.2 + ph[i]);
+    const bx = f[0] + (c[7] - f[0]) * sb, by = f[1] + (c[8] - f[1]) * sb;
+    const dx = (bx + (c[0] - bx) * e - f[0]) * fbr[id], dy = (by + (c[1] - by) * e - f[1]) * fbr[id] / A;
+    const x = f[0] + dx * fcs[id] - dy * fsn[id] + fsw[id], y = f[1] + (dx * fsn[id] + dy * fcs[id]) * A;
+    let col = c[3];
+    if (k === 0 && e < 1) {                               // el brote es apagado y verdoso
+      const m = 0.45 + 0.55 * e;
+      col = `rgb(${(76 + (CR[i] - 76) * m) | 0},${(84 + (CG[i] - 84) * m) | 0},${(40 + (CB[i] - 40) * m) | 0})`;
+    }
+    PX[i] = x; PY[i] = y; PA[i] = a; PC[i] = col; vis[i] = 1;
+    if (a > 0.5) {
+      const ix = Math.round(x), iy = Math.round(y);
+      if (ix >= 0 && ix < S.cols && iy >= 0 && iy < S.rows) occ[iy * S.cols + ix] = 1;
+    }
+  }
+
+  // 2) fondo: partículas, hojas y tallos (no se dibujan bajo los pétalos)
+  const pf = ease((T - TL.particles[0]) / (TL.particles[1] - TL.particles[0]));
+  for (let i = 0; i < FS; i++) {
+    const c = C[i], k = c[5], id = c[6];
+    let x, y, a;
+    if (k === 2) {
+      if (pf < 0.01) continue;
+      a = pf * (0.15 + 0.85 * (0.5 + 0.5 * Math.sin(T * 1.6 + ph[i]))) * (0.4 + 0.6 * shim);
+      x = c[0] + Math.sin(T * 0.3 + ph[i]) * 0.4 * amp; y = c[1];
+    } else {
+      if (rk[i] > dens) continue;
+      a = 0.9 + 0.1 * shim * Math.sin(T * 1.5 + ph[i]);
+      if (k === 1) {
+        if (c[7] > fg[id]) continue;                       // el tallo todavía no llega aquí
+        x = c[0] + sway(c[1]); y = c[1];
+      } else {
+        const gv = lg[id]; if (gv < 0.03) continue;        // la hoja se despliega desde su origen
+        const L = LV[id];
+        x = L[0] + (c[0] - L[0]) * gv + sway(c[1]); y = L[1] + (c[1] - L[1]) * gv;
+      }
+    }
+    const ix = Math.round(x), iy = Math.round(y);
+    if (ix >= 0 && ix < S.cols && iy >= 0 && iy < S.rows && occ[iy * S.cols + ix]) continue;
+    put(i, x, y, a, c[3], k !== 2);
+  }
+
+  // 3) flores encima
+  for (let i = FS; i < N; i++) if (vis[i]) put(i, PX[i], PY[i], PA[i], PC[i], true);
+}
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (!paused && !drag) T += dt * speed;
+  if (!drag) $('tl').value = Math.min(T, TL.total);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function toggle() { paused = !paused; $('pp').textContent = paused ? 'Reanudar' : 'Pausar'; }
+$('pp').onclick = toggle;
+$('rs').onclick = () => { T = 0; };
+$('tl').onpointerdown = () => { drag = true; };
+$('tl').onpointerup = () => { drag = false; };
+$('tl').oninput = e => { T = +e.target.value; };
+$('sp').oninput = e => speed = +e.target.value;
+$('am').oninput = e => amp = +e.target.value;
+$('sh').oninput = e => shim = +e.target.value;
+$('dn').oninput = e => dens = +e.target.value;
+$('md').onchange = e => mode = e.target.value;
+addEventListener('keydown', e => { if (e.code === 'Space' && e.target.tagName !== 'BUTTON') { e.preventDefault(); toggle(); } });
+addEventListener('resize', fit);
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
