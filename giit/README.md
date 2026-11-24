@@ -1,0 +1,1 @@
+este es yn nuevo file para isntlacion de nose pues par a. no isntaalcione sot e sun neuvo file para espcificacion de la pagina 
