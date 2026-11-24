@@ -10,7 +10,7 @@ Cada celda: [col, fila, caracter, color, luminancia, tipo, id, a, b]
   tipo 3 hoja     (id = hoja)
   tipo 4 estambre (id = flor,  a,b = centro de la flor)
 La línea de tiempo (segundos) también sale de aquí: ver TIMELINE.
-"""
+""" 
 import argparse, json, math, random
 from dataclasses import dataclass, asdict
 
